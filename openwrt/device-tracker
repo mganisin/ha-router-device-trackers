@@ -1,0 +1,77 @@
+#!/usr/bin/lua
+
+local ubus = require "ubus"
+
+local BROKER = "mqtt.local"
+local TOPIC_PREFIX = "my/binary_sensor/presence_"
+local IFACE = "hostapd.phy0-ap0"
+local ZONE = "home"
+
+local devices = {
+    ["aa:bb:cc:dd:ee:ff"] = "myphone",
+    ["aa:bb:cc:dd:ee:f0"] = "donttrack_mylaptop",
+}
+
+local function get_dhcp_names()
+    local names = {}
+    local f = io.open("/tmp/dhcp.leases", "r")
+    if f then
+        for line in f:lines() do
+            local _, mac, _, name = line:match("(%d+)%s+(%S+)%s+(%S+)%s+(%S+)")
+            if mac and name and name ~= "*" then
+                names[mac:lower()] = name
+            end
+        end
+        f:close()
+    end
+    return names
+end
+
+local conn = ubus.connect()
+if not conn then return end
+
+local dhcp_names = get_dhcp_names()
+local status = conn:call(IFACE, "get_clients", {})
+local connected_clients = (status and status.clients) or {}
+
+local presence = {}
+for mac, name in pairs(devices) do
+    if not name:match("^donttrack") then
+        presence[name] = { state = "OFF", attr = string.format('{"source_type": "router", "zone": "%s"}', ZONE) }
+    end
+end
+
+local guest_macs = {}
+local guest_names = {}
+
+for mac, _ in pairs(connected_clients) do
+    local m = mac:lower()
+    local name = devices[m]
+    
+    if name then
+        if not name:match("^donttrack") then
+            presence[name].state = "ON"
+        end
+    else
+        table.insert(guest_macs, m)
+        table.insert(guest_names, dhcp_names[m] or "unknown")
+    end
+end
+
+local function mqtt_pub(topic_id, state, attributes)
+    local base_topic = TOPIC_PREFIX .. topic_id
+    os.execute(string.format("mosquitto_pub -h %s -t '%s/state' -m '%s' -r", BROKER, base_topic, state))
+    os.execute(string.format("mosquitto_pub -h %s -t '%s/attributes' -m '%s' -r", BROKER, base_topic, attributes))
+end
+
+for name, data in pairs(presence) do
+    mqtt_pub(name, data.state, data.attr)
+end
+
+local guest_state = #guest_macs > 0 and "ON" or "OFF"
+local guest_attr = string.format('{"macs": "%s", "names": "%s", "zone": "%s", "source_type": "router"}', 
+    table.concat(guest_macs, ","), 
+    table.concat(guest_names, ","),
+    ZONE
+)
+mqtt_pub("guest", guest_state, guest_attr)

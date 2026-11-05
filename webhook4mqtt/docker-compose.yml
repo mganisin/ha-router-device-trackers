@@ -1,0 +1,10 @@
+services:
+  webhook4mqtt:
+    build: .
+    container_name: webhook4mqtt
+    restart: always
+    environment:
+      - MQTT_BROKER=mqtt.local
+      - TZ=UTC
+    ports:
+      - "5000:5000"
